@@ -376,7 +376,7 @@ class Kernel:
   def _apply_tc_opt(self, use_tensor_cores:int, axis:int, tc_select:int, opt_level:int) -> bool:
     if use_tensor_cores and self.reduceop is not None and self.reduceop.arg[0] is Ops.ADD:
       tensor_cores = self.opts.tensor_cores if tc_select == -1 else [self.opts.tensor_cores[tc_select]]
-      for tc in tensor_cores:
+      for tc_idx, tc in enumerate(tensor_cores):
         tensor_core_opts = [self._create_tc_opts(reduceop, tc, axis, opt_level) for reduceop in self.reduceops]
         # can only fuse reduces with the same tc options
         assert all_same(tensor_core_opts)
@@ -385,11 +385,15 @@ class Kernel:
 
         # attempt to pad the tensor axes that require it
         try:
-          for axis, dim in tc_opts.axis_pads: self.apply_opt(Opt(OptOps.PADTO, axis, dim), append_opt=False) # PADTO might fail
-        except KernelOptError: continue
+          for pad_axis, dim in tc_opts.axis_pads:
+            self.apply_opt(Opt(OptOps.PADTO, pad_axis, dim), append_opt=False) # PADTO might fail
+        except KernelOptError as e:
+          continue
         # tensor core -- unroll the reduce dim (K), upcast and local the inner and outer dims (N, M)
-        for opt in tc.opts: self.apply_opt(Opt({"u":OptOps.UPCAST, "l":OptOps.LOCAL}[opt[0]], tc_opts.axes[int(opt[1])], 2), append_opt=False)
-        for dim, amt in tc.get_reduce_axes(): self.apply_opt(Opt(OptOps.UNROLL, 0, amt), append_opt=False) # TODO: this should be the reduce, not 0
+        for opt in tc.opts:
+          self.apply_opt(Opt({"u":OptOps.UPCAST, "l":OptOps.LOCAL}[opt[0]], tc_opts.axes[int(opt[1])], 2), append_opt=False)
+        for dim, amt in tc.get_reduce_axes():
+          self.apply_opt(Opt(OptOps.UNROLL, 0, amt), append_opt=False) # TODO: this should be the reduce, not 0
         self.tensor_core = tc
         self.use_tensor_cores = use_tensor_cores  # TC=2 will do the shape ops without the WMMA
         return True
@@ -413,25 +417,47 @@ class Kernel:
       1: allows kernels with multiple reduce axes and also multiplication of Ops.CAST'd buffers
       2: allows kernels with M, N, K axes that are not multiples of the tensor core dimensions by applying padding those axes as needed
     """
+    print(f"DEBUG: apply_tensor_cores called with use_tensor_cores={use_tensor_cores}, axis={axis}")
     if tc_select is None: tc_select = TC_SELECT.value
     if tc_opt is None: tc_opt = TC_OPT.value
-    if not self.opts.tensor_cores: return False
+    print(f"DEBUG: tc_select={tc_select}, tc_opt={tc_opt}")
+    
+    if not self.opts.tensor_cores:
+      print(f"DEBUG: No tensor cores available in self.opts.tensor_cores")
+      return False
+    
+    print(f"DEBUG: self.opts.tensor_cores available: {len(self.opts.tensor_cores)}")
+    print(f"DEBUG: First tensor core: dims={self.opts.tensor_cores[0].dims}, dtype_in={self.opts.tensor_cores[0].dtype_in}, dtype_out={self.opts.tensor_cores[0].dtype_out}")
+    
     try: # check TC first and apply hand-coded opts if successful
+      print(f"DEBUG: Attempting to apply OptOps.TC optimization")
       self.apply_opt(Opt(OptOps.TC, axis, (tc_select, tc_opt, use_tensor_cores)))
+      print(f"DEBUG: Successfully applied OptOps.TC optimization")
 
       if (tc_opts:=self.tensor_core_opts) is not None:
-        if extra_opts is not None: self.apply_opts(extra_opts)
+        print(f"DEBUG: tensor_core_opts is not None")
+        if extra_opts is not None:
+          print(f"DEBUG: Applying extra_opts")
+          self.apply_opts(extra_opts)
         else:
-          if AMX: return True # skip hand-coded TC opts if AMX, upcasting will make kernel slower
+          if AMX:
+            print(f"DEBUG: AMX is True, skipping hand-coded TC opts")
+            return True # skip hand-coded TC opts if AMX, upcasting will make kernel slower
           # hand-coded TC opts
+          print(f"DEBUG: Applying hand-coded TC opts")
           for tc_dim in [tc_dim for tc_dim in [1,0] if tc_opts.axes_exist[tc_dim]]: # attempt to upcast M and N
             szs = [sz for sz in [5,4,3,2] if self.full_shape[tc_opts.axes[tc_dim]] % sz == 0]
-            if szs: self.apply_opt(Opt(OptOps.UPCAST, tc_opts.axes[tc_dim], szs[0]))
+            if szs:
+              print(f"DEBUG: Applying UPCAST opt for tc_dim={tc_dim}, axis={tc_opts.axes[tc_dim]}, sz={szs[0]}")
+              self.apply_opt(Opt(OptOps.UPCAST, tc_opts.axes[tc_dim], szs[0]))
 
           if tc_opts.axes_exist[0] and (szs := [sz for sz in [4,2] if self.full_shape[tc_opts.axes[0]] % sz == 0]): # attempt to local N
+            print(f"DEBUG: Applying LOCAL opt for axis={tc_opts.axes[0]}, sz={szs[0]}")
             self.apply_opt(Opt(OptOps.LOCAL, tc_opts.axes[0], szs[0]))
+      print(f"DEBUG: Successfully applied tensor core optimization")
       return True
-    except KernelOptError:
+    except KernelOptError as e:
+      print(f"DEBUG: KernelOptError during apply_tensor_cores: {e}")
       return False
 
   # strings like ['g0', 'g1', 'l0', 'l1', 'l2', 'l3', 'l4', 'l5', 'R0', 'r0', 'r1', 'r2', 'u0', 'u1', 'u2']
