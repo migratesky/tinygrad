@@ -1,0 +1,27 @@
+name: Test AMD MatMul
+
+on:
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  test_amd_matmul:
+    name: Test AMD MatMul
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    - name: Setup Environment
+      uses: ./.github/actions/setup-tinygrad
+      with:
+        key: amd-matmul
+        deps: testing_minimal
+    - name: Test with EMULATE_AMD=1
+      run: |
+        PYTHONPATH=. DEBUG=2 EMULATE_AMD=1 FORWARD_ONLY=1 PYTHON=1 N=16 HALF=1 ACC_HALF=0 python3 ./extra/gemm/simple_matmul.py
+    - name: Test with EMULATE_AMD_RDNA3
+      run: |
+        PYTHONPATH=. DEBUG=2 EMULATE_AMD=1 FORWARD_ONLY=1 PYTHON=1 N=16 HALF=1 ACC_HALF=0 ATOL=1e-3 python3 ./extra/gemm/simple_matmul.py
+    - name: Test with EMULATE_AMD_RDNA4
+      run: |
+        PYTHONPATH=. DEBUG=2 EMULATE_AMD_RDNA4=1 FORWARD_ONLY=1 PYTHON=1 N=16 HALF=1 ACC_HALF=0 python3 ./extra/gemm/simple_matmul.py
